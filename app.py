@@ -7,12 +7,12 @@ from PIL import Image
 import os
 import tempfile
 import time
+import re
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider, Button
 from matplotlib.figure import Figure
 
 # --- BACKEND SETUP ---
-# We use interactive backends ONLY for the native playback window.
 if "backend_set" not in st.session_state:
     try:
         matplotlib.use('TkAgg')
@@ -38,7 +38,6 @@ st.markdown("""
 }
 h1, h2, h3 { color: #f1f5f9; }
 
-/* Refined Card Styling */
 .card-header {
     background: rgba(34, 211, 238, 0.1);
     padding: 15px 20px;
@@ -59,7 +58,6 @@ h1, h2, h3 { color: #f1f5f9; }
     margin-bottom: 20px;
 }
 
-/* Button Styling: Cyan to Blue */
 div.stButton > button {
     background: linear-gradient(90deg, #06b6d4, #0ea5e9);
     color: white;
@@ -84,13 +82,14 @@ div.stButton > button:hover {
     border-radius:10px;
     font-size:13px;
     font-family: 'Fira Code', 'Courier New', monospace;
-    text-align:center;
+    text-align:left;
     border: 1px solid #1e293b;
     box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
-    overflow-x: auto;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
 }
 
-/* Progress bar color */
 .stProgress > div > div > div > div {
     background-color: #22d3ee;
 }
@@ -132,21 +131,71 @@ def process_frame_to_paths(frame, t1, t2, blur_k, scale_percent, simplify_factor
         
     return edges, simplified_paths, width, height
 
-def generate_fourier_eq(paths, frame_idx, width, height, n_coeffs=20):
-    if not paths: return f"% Frame {frame_idx}: No paths"
+def sort_paths_nearest_neighbor(paths):
+    """Sorts paths to minimize jump distance, reducing Fourier 'scribble' noise."""
+    if not paths: return []
+    remaining = list(paths)
+    sorted_paths = [remaining.pop(0)]
+    while remaining:
+        last_pt = sorted_paths[-1][-1]
+        best_idx = 0
+        min_dist = float('inf')
+        for i, p in enumerate(remaining):
+            d = np.linalg.norm(last_pt - p[0])
+            if d < min_dist:
+                min_dist = d
+                best_idx = i
+        sorted_paths.append(remaining.pop(best_idx))
+    return sorted_paths
+
+def get_fourier_coefficients(paths, width, height, n_coeffs=50):
+    """Combines paths with smoothing bridges to create a single image function."""
     cx, cy = width / 2, height / 2
-    path = max(paths, key=len)
-    complex_pts = [complex(p[1] - cx, -(p[0] - cy)) for p in path]
-    N = len(complex_pts)
-    coeffs = np.fft.fft(complex_pts)
+    optimized_paths = sort_paths_nearest_neighbor(paths)
+    combined_pts = []
+    
+    for i, path in enumerate(optimized_paths):
+        path_pts = [complex(p[1] - cx, -(p[0] - cy)) for p in path]
+        combined_pts.extend(path_pts)
+        # Add a small bridge to next path
+        if i < len(optimized_paths) - 1:
+            last = path_pts[-1]
+            start_next = complex(optimized_paths[i+1][0][1] - cx, -(optimized_paths[i+1][0][0] - cy))
+            for step in np.linspace(0, 1, 5):
+                combined_pts.append(last * (1-step) + start_next * step)
+    
+    if not combined_pts: return None, None, None, 0
+    N = len(combined_pts)
+    coeffs = np.fft.fft(combined_pts)
     freqs = np.fft.fftfreq(N)
     indices = np.argsort(np.abs(coeffs))[::-1][:n_coeffs]
+    return coeffs, freqs, indices, N
+
+def generate_fourier_eq(paths, frame_idx, width, height, n_coeffs=50):
+    res = get_fourier_coefficients(paths, width, height, n_coeffs)
+    if res[0] is None: return f"% Frame {frame_idx}: No paths"
+    coeffs, freqs, indices, N = res
     x_p, y_p = [], []
     for idx in indices:
         amp, phase, freq = np.abs(coeffs[idx])/N, np.angle(coeffs[idx]), freqs[idx]*N
         x_p.append(f"{amp:.2f}\\cos({freq:.1f}t + {phase:.2f})")
         y_p.append(f"{amp:.2f}\\sin({freq:.1f}t + {phase:.2f})")
     return f"({ ' + '.join(x_p) }, { ' + '.join(y_p) }) \\{{{frame_idx} <= T < {frame_idx + 1}\\}}"
+
+def parse_pasted_equation(text):
+    """Parses exported Fourier LaTeX strings back into visual points."""
+    pattern = r"([\-\d\.]+)\\cos\(\s*([\-\d\.]+)t\s*([\+\-\s\d\.]+)\)"
+    matches = re.findall(pattern, text)
+    if not matches: return None, None
+    t = np.linspace(0, 2 * np.pi, 1000)
+    x_f, y_f = np.zeros_like(t), np.zeros_like(t)
+    for amp_s, freq_s, phase_s in matches:
+        amp, freq = float(amp_s), float(freq_s)
+        clean_phase = phase_s.replace(" ", "").replace("+-", "-").replace("++", "+")
+        phase = float(clean_phase)
+        x_f += amp * np.cos(freq * t + phase)
+        y_f += amp * np.sin(freq * t + phase)
+    return x_f, y_f
 
 def generate_linear_eqs(paths, frame_idx, width, height):
     eqs = []
@@ -172,14 +221,11 @@ def launch_native_playback(all_frame_data, color, line_width, target_duration_se
         ax.set_facecolor('#020617')
         ax.set_aspect('equal')
         ax.axis('off')
-        
         first = all_frame_data[0]
         ax.set_xlim(-first['w']/2 - 5, first['w']/2 + 5)
         ax.set_ylim(-first['h']/2 - 5, first['h']/2 + 5)
-        
         line_collection = []
         playback = {'current': 0, 'playing': True}
-
         def draw_frame(f_idx):
             for l in line_collection: l.remove()
             line_collection.clear()
@@ -190,28 +236,23 @@ def launch_native_playback(all_frame_data, color, line_width, target_duration_se
                 line_collection.append(line)
             ax.set_title(f"Symbolic Motion: Frame {f_idx}", color='#22d3ee', fontsize=14, fontweight='bold')
             fig.canvas.draw_idle()
-
         ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03], facecolor='#1e293b')
         slider = Slider(ax_slider, 'Frame ', 0, len(all_frame_data)-1, valinit=0, valstep=1, color='#22d3ee')
         slider.label.set_color('white')
-        
         ax_btn = plt.axes([0.45, 0.03, 0.1, 0.04])
         btn = Button(ax_btn, 'Pause', color='#0ea5e9', hovercolor='#06b6d4')
         btn.label.set_color('white')
-
         slider.on_changed(lambda v: draw_frame(int(v)))
         btn.on_clicked(lambda e: (playback.update(playing=not playback['playing']), btn.label.set_text('Play' if not playback['playing'] else 'Pause')))
-
         def update(i):
             if playback['playing']:
                 playback['current'] = (playback['current'] + 1) % len(all_frame_data)
                 slider.set_val(playback['current'])
             return line_collection
-
         draw_frame(0)
         ani = FuncAnimation(fig, update, frames=len(all_frame_data), interval=(target_duration_sec*1000)/len(all_frame_data), blit=False)
         plt.show(block=True)
-    except Exception as e: st.error(f"Playback Error: {e}")
+    except Exception as e: st.error(f"Playback error: {e}")
 
 # -----------------------------
 # Premium UI Layout
@@ -234,34 +275,29 @@ c1, c2 = st.columns([1, 1.6])
 
 with c1:
     st.markdown("<div class='card-header'>🎛 Controls</div><div class='card-content'>", unsafe_allow_html=True)
-    
     video_file = st.file_uploader("Upload Video Source", type=["mp4", "mov"])
     
     with st.expander("⚙️ Vector Settings"):
         mode = st.radio("Math Model", ["Fourier (One-Function)", "Linear (Classic)"])
+        f_detail = st.slider("Fourier Detail", 10, 300, 100)
         fps_limit = st.slider("Sampling FPS", 1, 15, 5)
-        max_f = st.slider("Max Frames", 5, 150, 40)
+        max_f = st.slider("Max Frames", 5, 200, 50)
         res = st.slider("Resolution Scale %", 5, 50, 15)
-        sim = st.slider("Simplification", 0.5, 10.0, 2.0)
+        sim = st.slider("Simplification", 0.1, 5.0, 1.0)
         t1 = st.slider("Sensitivity", 0, 500, 100)
         t2 = st.slider("Strength", 0, 500, 200)
 
     if video_file and st.button("🚀 Process & Generate Math"):
-        # Dynamic calculation of video size
         st.session_state.video_size_mb = video_file.size / (1024 * 1024)
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as t_vid:
             t_vid.write(video_file.getbuffer())
             v_path = t_vid.name
-        
         try:
             cap = cv2.VideoCapture(v_path)
             orig_fps = cap.get(cv2.CAP_PROP_FPS)
             skip = max(1, int(orig_fps / fps_limit))
-            
             f_data, m_eqs = [], []
             p_bar = st.progress(0)
-            
             f_idx, processed = 0, 0
             while cap.isOpened() and processed < max_f:
                 ret, frame = cap.read()
@@ -269,59 +305,60 @@ with c1:
                 if f_idx % skip == 0:
                     edges, paths, w, h = process_frame_to_paths(frame, t1, t2, 3, res, sim)
                     if mode == "Fourier (One-Function)":
-                        m_eqs.append(generate_fourier_eq(paths, processed, w, h, 30))
+                        m_eqs.append(generate_fourier_eq(paths, processed, w, h, f_detail))
                     else:
                         m_eqs.extend(generate_linear_eqs(paths, processed, w, h))
-                    
                     f_data.append({'paths': paths, 'w': w, 'h': h, 'edges': edges, 'id': processed})
                     processed += 1
                     p_bar.progress(processed / max_f)
                 f_idx += 1
-            
             cap.release()
             st.session_state.frame_data = f_data
             st.session_state.all_eqs = m_eqs
             st.session_state.processed = True
-            st.success("Symbolic mapping complete!")
+            st.success("Mapping complete!")
         finally:
             if os.path.exists(v_path): os.remove(v_path)
-
     st.markdown("</div>", unsafe_allow_html=True)
     
-    if st.session_state.processed:
-        st.markdown("<div class='card-header'>🎞 Playback</div><div class='card-content'>", unsafe_allow_html=True)
-        dur = st.slider("Duration (s)", 1, 30, 5)
-        if st.button("📺 Launch Native Viewer"):
-            launch_native_playback(st.session_state.frame_data, "#22d3ee", 2.0, dur)
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='card-header'>📥 Manual Decoder</div><div class='card-content'>", unsafe_allow_html=True)
+    p_in = st.text_area("Paste Fourier LaTeX here")
+    if st.button("🔍 Decode & Graph"):
+        px, py = parse_pasted_equation(p_in)
+        if px is not None:
+            fig_p = Figure(figsize=(6, 4), facecolor="#020617")
+            ax_p = fig_p.subplots()
+            ax_p.set_facecolor("#020617")
+            ax_p.plot(px, py, color="#22d3ee", lw=2)
+            ax_p.set_aspect('equal')
+            ax_p.axis('off')
+            st.pyplot(fig_p)
+        else: st.error("Invalid format.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with c2:
     st.markdown("<div class='card-header'>📊 Symbolic Visualization</div><div class='card-content'>", unsafe_allow_html=True)
-    
     if st.session_state.processed:
-        idx = st.slider("Scrub Through Math", 0, len(st.session_state.frame_data)-1, 0)
+        idx = st.slider("Scrub", 0, len(st.session_state.frame_data)-1, 0)
         curr = st.session_state.frame_data[idx]
-        
         fig = Figure(figsize=(8, 5), facecolor="#020617")
         ax = fig.subplots()
         ax.set_facecolor("#020617")
-        
         cx, cy = curr['w']/2, curr['h']/2
         for p in curr['paths']:
             ax.plot(p[:, 1]-cx, -(p[:, 0]-cy), color="#22d3ee", lw=1.5)
-            
         ax.set_aspect('equal')
         ax.axis('off')
         st.pyplot(fig)
         
-        st.markdown("<p style='color:#94a3b8; font-size:13px; margin-bottom: 5px;'>Active Function (T-Parameterized):</p>", unsafe_allow_html=True)
-        frame_eq = next((e for e in st.session_state.all_eqs if f"\\{{{idx} <= T" in e), "N/A")
-        st.markdown(f"<div class='eq-box'>{frame_eq}</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color:#94a3b8; font-size:13px; margin-bottom: 5px;'>Active Equations (Frame Parameterized):</p>", unsafe_allow_html=True)
+        # FIX: Join ALL equations for the current frame
+        frame_eqs = [e for e in st.session_state.all_eqs if f"\\{{{idx} <= T < {idx+1}\\}}" in e]
+        st.markdown(f"<div class='eq-box'>{chr(10).join(frame_eqs) if frame_eqs else 'N/A'}</div>", unsafe_allow_html=True)
     else:
-        st.info("Awaiting video input to generate symbolic vectors.")
+        st.info("Awaiting input.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Stats Card (Now Dynamic)
     st.markdown("<div class='card-header'>📦 Symbolic Compression Analysis</div><div class='card-content'>", unsafe_allow_html=True)
     cA, cB = st.columns(2)
     with cA:
@@ -329,23 +366,11 @@ with c2:
         st.markdown(f"<p style='color:#94a3b8; margin:0;'>Raw Video Stream</p><h2 style='margin:0;'>{label}</h2>", unsafe_allow_html=True)
     with cB:
         if st.session_state.processed:
-            # Calculate actual size of the generated equation strings
-            eq_string = "\n".join(st.session_state.all_eqs)
-            size_kb = len(eq_string.encode('utf-8')) / 1024
-            
-            # Calculate real reduction ratio
-            video_size_kb = st.session_state.video_size_mb * 1024
-            reduction = 100 * (1 - (size_kb / video_size_kb)) if video_size_kb > 0 else 0
-            
-            st.markdown(f"<p style='color:#94a3b8; margin:0;'>Symbolic Model</p><h2 style='color:#22d3ee; margin:0;'>{size_kb:.1f} KB ↓ {reduction:.1f}%</h2>", unsafe_allow_html=True)
+            eq_str = "\n".join(st.session_state.all_eqs)
+            size_kb = len(eq_str.encode('utf-8')) / 1024
+            v_kb = st.session_state.video_size_mb * 1024
+            red = 100 * (1 - (size_kb / v_kb)) if v_kb > 0 else 0
+            st.markdown(f"<p style='color:#94a3b8; margin:0;'>Symbolic Model</p><h2 style='color:#22d3ee; margin:0;'>{size_kb:.1f} KB ↓ {red:.1f}%</h2>", unsafe_allow_html=True)
         else:
             st.markdown("<p style='color:#94a3b8; margin:0;'>Symbolic Model</p><h2 style='color:#22d3ee; margin:0;'>--</h2>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
-with st.expander("🔍 Scientific Methodology"):
-    st.markdown("""
-    - **Extraction:** Canny Edge Detection identifies structural boundaries.
-    - **Vectorization:** Douglas-Peucker simplification reduces paths into discrete nodes.
-    - **Transformation:** Fast Fourier Transform (FFT) or Linear Interpolation maps visual nodes into continuous time-parameterized equations.
-    - **Compression:** Massive data reduction while maintaining structural semantics.
-    """)
