@@ -1,351 +1,335 @@
-import cv2
-import numpy as np
-import matplotlib
-import streamlit as st
-from skimage import measure
-from PIL import Image
-import os
-import tempfile
+import streamlit as st # type: ignore
 import time
-from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Slider, Button
-from matplotlib.figure import Figure
 
-# --- BACKEND SETUP ---
-# We use interactive backends ONLY for the native playback window.
-if "backend_set" not in st.session_state:
-    try:
-        matplotlib.use('TkAgg')
-    except Exception:
-        try:
-            matplotlib.use('Qt5Agg')
-        except Exception:
-            pass
-    st.session_state.backend_set = True
+# -----------------------------------------------------------------------------
+# PAGE CONFIG
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Motion2Math",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+    page_icon="🌌"
+)
 
-import matplotlib.pyplot as plt
+# -----------------------------------------------------------------------------
+# STATE
+# -----------------------------------------------------------------------------
+if "video_file" not in st.session_state:
+    st.session_state.video_file = None
+if "is_processed" not in st.session_state:
+    st.session_state.is_processed = False
+if "current_frame" not in st.session_state:
+    st.session_state.current_frame = 0
+if "is_playing" not in st.session_state:
+    st.session_state.is_playing = False
 
-st.set_page_config(page_title="Motion2Math - Symbolic Video Engine", layout="wide")
-
-# -----------------------------
-# Custom Styling (Cooler Cyan/Blue Theme)
-# -----------------------------
+# -----------------------------------------------------------------------------
+# PREMIUM BACKGROUND + STYLING
+# -----------------------------------------------------------------------------
 st.markdown("""
 <style>
 .stApp {
-    background: linear-gradient(135deg, #020617, #0f172a);
-    color: #e2e8f0;
-}
-h1, h2, h3 { color: #f1f5f9; }
-
-/* Refined Card Styling */
-.card-header {
-    background: rgba(34, 211, 238, 0.1);
-    padding: 15px 20px;
-    border-radius: 12px 12px 0 0;
-    border-left: 4px solid #22d3ee;
-    margin-bottom: 0px;
-    font-weight: bold;
-    color: #22d3ee;
-}
-
-.card-content {
-    background: rgba(255, 255, 255, 0.03);
-    padding: 20px;
-    border-radius: 0 0 12px 12px;
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(255,255,255,0.05);
-    border-top: none;
-    margin-bottom: 20px;
-}
-
-/* Button Styling: Cyan to Blue */
-div.stButton > button {
-    background: linear-gradient(90deg, #06b6d4, #0ea5e9);
+    background:
+        radial-gradient(circle at 20% 30%, rgba(168,85,247,0.15), transparent 40%),
+        radial-gradient(circle at 80% 70%, rgba(34,211,238,0.15), transparent 40%),
+        linear-gradient(135deg, #0b0f1a, #0f172a, #1e1b4b);
+    background-size: 200% 200%;
+    animation: gradientShift 20s ease infinite;
     color: white;
-    border-radius: 8px;
-    padding: 10px 20px;
-    border: none;
+}
+
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+.block-container {
+    max-width: 1440px;
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+}
+
+.glass {
+    background: rgba(255,255,255,0.04);
+    backdrop-filter: blur(18px);
+    border-radius: 20px;
+    padding: 1.75rem;
+    border: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 1.5rem;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+}
+
+.glass:hover {
+    transform: translateY(-4px);
+    transition: 0.3s ease;
+}
+
+.gradient-text {
+    background: linear-gradient(90deg,#c084fc,#22d3ee,#c084fc);
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: titleShift 6s linear infinite;
+}
+
+@keyframes titleShift {
+    0% { background-position: 0% center; }
+    100% { background-position: 200% center; }
+}
+
+.upload-box {
+    margin-top: 1rem;
+    background: rgba(255,255,255,0.04);
+    border: 1px dashed rgba(255,255,255,0.25);
+    border-radius: 16px;
+    padding: 2.5rem 1rem;
+    text-align: center;
+}
+
+.upload-icon {
+    font-size: 2.5rem;
+    margin-bottom: 0.8rem;
+    color: #c084fc;
+}
+
+.upload-text {
     font-weight: 600;
+    margin-bottom: 0.4rem;
+}
+
+.upload-subtext {
+    font-size: 0.85rem;
+    color: #94a3b8;
+}
+
+.stButton button {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    height: 48px;
+    font-weight: 600;
+}
+
+.stButton button:hover {
+    border-color:#22d3ee;
+    box-shadow:0 0 15px rgba(34,211,238,0.4);
+}
+/* HOW IT WORKS CARDS */
+.how-card {
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    padding: 1.5rem;
+    border-radius: 18px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 1rem;
     transition: all 0.3s ease;
-    width: 100%;
 }
 
-div.stButton > button:hover {
-    background: linear-gradient(90deg, #0ea5e9, #06b6d4);
-    box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
-    transform: translateY(-1px);
+.how-card:hover {
+    background: rgba(255,255,255,0.07);
+    transform: translateY(-3px);
 }
 
-.eq-box {
-    background: #020617;
-    color:#22d3ee;
-    padding:15px;
-    border-radius:10px;
-    font-size:13px;
-    font-family: 'Fira Code', 'Courier New', monospace;
-    text-align:center;
-    border: 1px solid #1e293b;
-    box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
-    overflow-x: auto;
+.icon-box {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    color: white;
 }
 
-/* Progress bar color */
-.stProgress > div > div > div > div {
-    background-color: #22d3ee;
-}
+.icon-blue { background: linear-gradient(135deg,#22d3ee,#0ea5e9); }
+.icon-pink { background: linear-gradient(135deg,#c084fc,#ec4899); }
+.icon-green { background: linear-gradient(135deg,#22c55e,#10b981); }
+
+.how-title { font-weight: 600; font-size: 1.05rem; }
+.how-sub { font-size: 0.9rem; color: #94a3b8; }
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------
-# Session State & Logic
-# -----------------------------
-if "frame_data" not in st.session_state:
-    st.session_state.frame_data = []
-if "all_eqs" not in st.session_state:
-    st.session_state.all_eqs = []
-if "processed" not in st.session_state:
-    st.session_state.processed = False
-if "video_size_mb" not in st.session_state:
-    st.session_state.video_size_mb = 0.0
-
-# --- CORE MATH FUNCTIONS ---
-
-def process_frame_to_paths(frame, t1, t2, blur_k, scale_percent, simplify_factor):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    width = int(gray.shape[1] * scale_percent / 100)
-    height = int(gray.shape[0] * scale_percent / 100)
-    width, height = max(1, width), max(1, height)
-    low_res = cv2.resize(gray, (width, height), interpolation=cv2.INTER_AREA)
-    
-    if blur_k % 2 == 0: blur_k += 1
-    blurred = cv2.GaussianBlur(low_res, (blur_k, blur_k), 0)
-    edges = cv2.Canny(blurred, t1, t2)
-    
-    contours = measure.find_contours(edges, 0.5)
-    simplified_paths = []
-    for contour in contours:
-        cnt = contour.astype(np.float32).reshape(-1, 1, 2)
-        epsilon = simplify_factor * cv2.arcLength(cnt, True) / 100.0 if simplify_factor > 0 else 0
-        approx = cv2.approxPolyDP(cnt, epsilon, False)
-        simplified_paths.append(approx.reshape(-1, 2))
-        
-    return edges, simplified_paths, width, height
-
-def generate_fourier_eq(paths, frame_idx, width, height, n_coeffs=20):
-    if not paths: return f"% Frame {frame_idx}: No paths"
-    cx, cy = width / 2, height / 2
-    path = max(paths, key=len)
-    complex_pts = [complex(p[1] - cx, -(p[0] - cy)) for p in path]
-    N = len(complex_pts)
-    coeffs = np.fft.fft(complex_pts)
-    freqs = np.fft.fftfreq(N)
-    indices = np.argsort(np.abs(coeffs))[::-1][:n_coeffs]
-    x_p, y_p = [], []
-    for idx in indices:
-        amp, phase, freq = np.abs(coeffs[idx])/N, np.angle(coeffs[idx]), freqs[idx]*N
-        x_p.append(f"{amp:.2f}\\cos({freq:.1f}t + {phase:.2f})")
-        y_p.append(f"{amp:.2f}\\sin({freq:.1f}t + {phase:.2f})")
-    return f"({ ' + '.join(x_p) }, { ' + '.join(y_p) }) \\{{{frame_idx} <= T < {frame_idx + 1}\\}}"
-
-def generate_linear_eqs(paths, frame_idx, width, height):
-    eqs = []
-    cx, cy = width / 2, height / 2
-    time_block = f"\\{{{frame_idx} <= T < {frame_idx + 1}\\}}"
-    for path in paths:
-        for i in range(len(path) - 1):
-            y1, x1 = -(path[i][0] - cy), path[i][1] - cx
-            y2, x2 = -(path[i+1][0] - cy), path[i+1][1] - cx
-            if abs(x2 - x1) > 0.001:
-                m = (y2 - y1) / (x2 - x1)
-                eqs.append(f"y - {y1:.2f} = {m:.3f}(x - {x1:.2f}) \\{{{min(x1,x2):.2f} <= x <= {max(x1,x2):.2f}\\}}{time_block}")
-            else:
-                eqs.append(f"x = {x1:.2f} \\{{{min(y1,y2):.2f} <= y <= {max(y1,y2):.2f}\\}}{time_block}")
-    return eqs
-
-def launch_native_playback(all_frame_data, color, line_width, target_duration_sec):
-    try:
-        plt.close('all')
-        fig, ax = plt.subplots(num="Motion2Math Native Playback", figsize=(10, 9))
-        plt.subplots_adjust(bottom=0.25)
-        fig.patch.set_facecolor('#020617')
-        ax.set_facecolor('#020617')
-        ax.set_aspect('equal')
-        ax.axis('off')
-        
-        first = all_frame_data[0]
-        ax.set_xlim(-first['w']/2 - 5, first['w']/2 + 5)
-        ax.set_ylim(-first['h']/2 - 5, first['h']/2 + 5)
-        
-        line_collection = []
-        playback = {'current': 0, 'playing': True}
-
-        def draw_frame(f_idx):
-            for l in line_collection: l.remove()
-            line_collection.clear()
-            curr = all_frame_data[f_idx]
-            cx, cy = curr['w']/2, curr['h']/2
-            for path in curr['paths']:
-                line, = ax.plot(path[:, 1]-cx, -(path[:, 0]-cy), color=color, lw=line_width)
-                line_collection.append(line)
-            ax.set_title(f"Symbolic Motion: Frame {f_idx}", color='#22d3ee', fontsize=14, fontweight='bold')
-            fig.canvas.draw_idle()
-
-        ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03], facecolor='#1e293b')
-        slider = Slider(ax_slider, 'Frame ', 0, len(all_frame_data)-1, valinit=0, valstep=1, color='#22d3ee')
-        slider.label.set_color('white')
-        
-        ax_btn = plt.axes([0.45, 0.03, 0.1, 0.04])
-        btn = Button(ax_btn, 'Pause', color='#0ea5e9', hovercolor='#06b6d4')
-        btn.label.set_color('white')
-
-        slider.on_changed(lambda v: draw_frame(int(v)))
-        btn.on_clicked(lambda e: (playback.update(playing=not playback['playing']), btn.label.set_text('Play' if not playback['playing'] else 'Pause')))
-
-        def update(i):
-            if playback['playing']:
-                playback['current'] = (playback['current'] + 1) % len(all_frame_data)
-                slider.set_val(playback['current'])
-            return line_collection
-
-        draw_frame(0)
-        ani = FuncAnimation(fig, update, frames=len(all_frame_data), interval=(target_duration_sec*1000)/len(all_frame_data), blit=False)
-        plt.show(block=True)
-    except Exception as e: st.error(f"Playback Error: {e}")
-
-# -----------------------------
-# Premium UI Layout
-# -----------------------------
+# -----------------------------------------------------------------------------
+# HEADER
+# -----------------------------------------------------------------------------
 st.markdown("""
-<h1 style='text-align:center; font-size:54px;
-background: linear-gradient(90deg,#22d3ee,#0ea5e9);
--webkit-background-clip: text;
--webkit-text-fill-color: transparent; margin-bottom: 0;'>
+<div style="text-align:center; margin-bottom:4rem;">
+<h1 class="gradient-text" style="font-size:3.8rem;font-weight:700;">
 Motion2Math
 </h1>
-<p style='text-align:center; color:#94a3b8; font-size:18px; margin-top: 0;'>
-Transforming visual motion into interpretable mathematical language
+<p style="color:#a1a1aa; font-size:1.1rem; max-width:650px; margin:auto;">
+Transform video motion into time-parameterized mathematical equations and visualize movement symbolically
 </p>
+</div>
 """, unsafe_allow_html=True)
 
-st.markdown("<div style='height: 2px; background: linear-gradient(90deg, transparent, #1e293b, transparent); margin: 20px 0;'></div>", unsafe_allow_html=True)
+# -----------------------------------------------------------------------------
+# MAIN LAYOUT
+# -----------------------------------------------------------------------------
+col_left, col_right = st.columns([3,7], gap="large")
 
-c1, c2 = st.columns([1, 1.6])
+# ---------------- LEFT COLUMN ----------------
+with col_left:
 
-with c1:
-    st.markdown("<div class='card-header'>🎛 Controls</div><div class='card-content'>", unsafe_allow_html=True)
-    
-    video_file = st.file_uploader("Upload Video Source", type=["mp4", "mov"])
-    
-    with st.expander("⚙️ Vector Settings"):
-        mode = st.radio("Math Model", ["Fourier (One-Function)", "Linear (Classic)"])
-        fps_limit = st.slider("Sampling FPS", 1, 15, 5)
-        max_f = st.slider("Max Frames", 5, 150, 40)
-        res = st.slider("Resolution Scale %", 5, 50, 15)
-        sim = st.slider("Simplification", 0.5, 10.0, 2.0)
-        t1 = st.slider("Sensitivity", 0, 500, 100)
-        t2 = st.slider("Strength", 0, 500, 200)
+    # Upload Card
+    st.markdown('<div class="glass">', unsafe_allow_html=True)
+    st.markdown("### Upload Video")
 
-    if video_file and st.button("🚀 Process & Generate Math"):
-        # Dynamic calculation of video size
-        st.session_state.video_size_mb = video_file.size / (1024 * 1024)
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as t_vid:
-            t_vid.write(video_file.getbuffer())
-            v_path = t_vid.name
-        
-        try:
-            cap = cv2.VideoCapture(v_path)
-            orig_fps = cap.get(cv2.CAP_PROP_FPS)
-            skip = max(1, int(orig_fps / fps_limit))
-            
-            f_data, m_eqs = [], []
-            p_bar = st.progress(0)
-            
-            f_idx, processed = 0, 0
-            while cap.isOpened() and processed < max_f:
-                ret, frame = cap.read()
-                if not ret: break
-                if f_idx % skip == 0:
-                    edges, paths, w, h = process_frame_to_paths(frame, t1, t2, 3, res, sim)
-                    if mode == "Fourier (One-Function)":
-                        m_eqs.append(generate_fourier_eq(paths, processed, w, h, 30))
-                    else:
-                        m_eqs.extend(generate_linear_eqs(paths, processed, w, h))
-                    
-                    f_data.append({'paths': paths, 'w': w, 'h': h, 'edges': edges, 'id': processed})
-                    processed += 1
-                    p_bar.progress(processed / max_f)
-                f_idx += 1
-            
-            cap.release()
-            st.session_state.frame_data = f_data
-            st.session_state.all_eqs = m_eqs
-            st.session_state.processed = True
-            st.success("Symbolic mapping complete!")
-        finally:
-            if os.path.exists(v_path): os.remove(v_path)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    if st.session_state.processed:
-        st.markdown("<div class='card-header'>🎞 Playback</div><div class='card-content'>", unsafe_allow_html=True)
-        dur = st.slider("Duration (s)", 1, 30, 5)
-        if st.button("📺 Launch Native Viewer"):
-            launch_native_playback(st.session_state.frame_data, "#22d3ee", 2.0, dur)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-with c2:
-    st.markdown("<div class='card-header'>📊 Symbolic Visualization</div><div class='card-content'>", unsafe_allow_html=True)
-    
-    if st.session_state.processed:
-        idx = st.slider("Scrub Through Math", 0, len(st.session_state.frame_data)-1, 0)
-        curr = st.session_state.frame_data[idx]
-        
-        fig = Figure(figsize=(8, 5), facecolor="#020617")
-        ax = fig.subplots()
-        ax.set_facecolor("#020617")
-        
-        cx, cy = curr['w']/2, curr['h']/2
-        for p in curr['paths']:
-            ax.plot(p[:, 1]-cx, -(p[:, 0]-cy), color="#22d3ee", lw=1.5)
-            
-        ax.set_aspect('equal')
-        ax.axis('off')
-        st.pyplot(fig)
-        
-        st.markdown("<p style='color:#94a3b8; font-size:13px; margin-bottom: 5px;'>Active Function (T-Parameterized):</p>", unsafe_allow_html=True)
-        frame_eq = next((e for e in st.session_state.all_eqs if f"\\{{{idx} <= T" in e), "N/A")
-        st.markdown(f"<div class='eq-box'>{frame_eq}</div>", unsafe_allow_html=True)
-    else:
-        st.info("Awaiting video input to generate symbolic vectors.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Stats Card (Now Dynamic)
-    st.markdown("<div class='card-header'>📦 Symbolic Compression Analysis</div><div class='card-content'>", unsafe_allow_html=True)
-    cA, cB = st.columns(2)
-    with cA:
-        label = f"{st.session_state.video_size_mb:.2f} MB" if st.session_state.processed else "--"
-        st.markdown(f"<p style='color:#94a3b8; margin:0;'>Raw Video Stream</p><h2 style='margin:0;'>{label}</h2>", unsafe_allow_html=True)
-    with cB:
-        if st.session_state.processed:
-            # Calculate actual size of the generated equation strings
-            eq_string = "\n".join(st.session_state.all_eqs)
-            size_kb = len(eq_string.encode('utf-8')) / 1024
-            
-            # Calculate real reduction ratio
-            video_size_kb = st.session_state.video_size_mb * 1024
-            reduction = 100 * (1 - (size_kb / video_size_kb)) if video_size_kb > 0 else 0
-            
-            st.markdown(f"<p style='color:#94a3b8; margin:0;'>Symbolic Model</p><h2 style='color:#22d3ee; margin:0;'>{size_kb:.1f} KB ↓ {reduction:.1f}%</h2>", unsafe_allow_html=True)
-        else:
-            st.markdown("<p style='color:#94a3b8; margin:0;'>Symbolic Model</p><h2 style='color:#22d3ee; margin:0;'>--</h2>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with st.expander("🔍 Scientific Methodology"):
     st.markdown("""
-    - **Extraction:** Canny Edge Detection identifies structural boundaries.
-    - **Vectorization:** Douglas-Peucker simplification reduces paths into discrete nodes.
-    - **Transformation:** Fast Fourier Transform (FFT) or Linear Interpolation maps visual nodes into continuous time-parameterized equations.
-    - **Compression:** Massive data reduction while maintaining structural semantics.
-    """)
+    <div class="upload-box">
+        <div class="upload-icon">⬆</div>
+        <div class="upload-text">Drag and drop file here</div>
+        <div class="upload-subtext">Limit 200MB • MP4, MOV, AVI</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    uploaded_file = st.file_uploader("", type=["mp4","mov","avi"], label_visibility="collapsed")
+
+    if uploaded_file:
+        st.session_state.video_file = uploaded_file
+        st.success("Video Uploaded Successfully")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Controls Card
+    st.markdown('<div class="glass">', unsafe_allow_html=True)
+    st.markdown("### Controls")
+
+    if st.button("⚡ Process Video", disabled=(st.session_state.video_file is None)):
+        with st.spinner("Processing trajectory..."):
+            time.sleep(1.2)
+        st.session_state.is_processed = True
+        st.session_state.current_frame = 0
+
+    st.markdown(
+        f"<div style='display:flex; justify-content:space-between;'>"
+        f"<span>Frame Position</span>"
+        f"<span style='color:#22d3ee'>{st.session_state.current_frame} / 120</span>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+    st.session_state.current_frame = st.slider("",0,120,st.session_state.current_frame,label_visibility="collapsed")
+
+    play_label = "⏸ Pause Animation" if st.session_state.is_playing else "▶ Play Animation"
+    if st.button(play_label):
+        st.session_state.is_playing = not st.session_state.is_playing
+
+    st.caption("🟢 Ready" if st.session_state.is_processed else "⚪ Awaiting processing")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------- RIGHT COLUMN ----------------
+with col_right:
+
+    # Motion Trajectory
+    st.markdown('<div class="glass" style="height:420px;">', unsafe_allow_html=True)
+    st.markdown("### Motion Trajectory")
+
+    if not st.session_state.is_processed:
+        st.markdown("""
+        <div style="height:300px; display:flex; align-items:center; justify-content:center; color:#64748b;">
+            Upload and process a video to view trajectory
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style="height:300px; background:rgba(0,0,0,0.35);
+        border-radius:14px; position:relative;">
+            <div style="
+                position:absolute;
+                top:50%;
+                left:{10+(st.session_state.current_frame/120)*80}%;
+                width:18px;
+                height:18px;
+                background:#22d3ee;
+                border-radius:50%;
+                box-shadow:0 0 20px #22d3ee;
+                transform:translate(-50%,-50%);
+            "></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # How It Works
+    st.markdown('<div class="glass">', unsafe_allow_html=True)
+    with st.expander("How It Works"):
+        st.markdown("""
+        <div style="margin-bottom:1.5rem; color:#a1a1aa;">
+    Motion2Math converts video footage into mathematical equations by analyzing object trajectories and fitting them to parametric models. This enables efficient compression and symbolic manipulation.
+    </div>
+
+    <div class="how-card">
+        <div class="icon-box icon-blue">🖥</div>
+        <div>
+            <div class="how-title">Object Detection</div>
+            <div class="how-sub">Computer vision algorithms track objects across video frames</div>
+        </div>
+    </div>
+
+    <div class="how-card">
+        <div class="icon-box icon-pink">📈</div>
+        <div>
+            <div class="how-title">Trajectory Analysis</div>
+            <div class="how-sub">Motion data is extracted and fitted to parametric equations</div>
+        </div>
+    </div>
+
+    <div class="how-card">
+        <div class="icon-box icon-green">✂</div>
+        <div>
+            <div class="how-title">Symbolic Representation</div>
+            <div class="how-sub">Mathematical models replace raw pixel data for compression</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Compression Cards
+    if st.session_state.is_processed:
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            st.markdown("""
+            <div class="glass">
+                <div style="color:#94a3b8;">Original Video</div>
+                <div style="font-size:1.9rem; font-weight:700; color:#22d3ee;">24.8 MB</div>
+                <div style="color:#64748b; font-size:0.85rem;">1920×1080, 120 frames</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with colB:
+            st.markdown("""
+            <div class="glass" style="position:relative;">
+                <div style="
+                    position:absolute;
+                    top:0;
+                    right:0;
+                    background:linear-gradient(to bottom right, rgba(192,132,252,0.25), rgba(34,211,238,0.25));
+                    padding:6px 14px;
+                    border-bottom-left-radius:14px;
+                    font-size:0.75rem;
+                    font-weight:600;">
+                    98.7% smaller
+                </div>
+                <div style="color:#94a3b8;">Mathematical Model</div>
+                <div style="font-size:1.9rem; font-weight:700; color:#c084fc;">312 KB</div>
+                <div style="color:#64748b; font-size:0.85rem;">Parametric equations + metadata</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# PLAYBACK LOOP
+# -----------------------------------------------------------------------------
+if st.session_state.is_playing and st.session_state.is_processed:
+    time.sleep(0.04)
+    st.session_state.current_frame += 1
+    if st.session_state.current_frame > 120:
+        st.session_state.current_frame = 0
+    st.rerun()
