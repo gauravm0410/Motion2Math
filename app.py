@@ -7,6 +7,7 @@ from PIL import Image
 import os
 import tempfile
 from matplotlib.animation import FuncAnimation
+from matplotlib.widgets import Slider, Button
 
 # --- BACKEND SETUP ---
 try:
@@ -91,7 +92,10 @@ def generate_linear_eqs(paths, frame_idx, width, height):
 def launch_native_playback(all_frame_data, color, line_width, target_duration_sec):
     try:
         plt.close('all')
-        fig, ax = plt.subplots(num="Math Video Playback", figsize=(10, 8))
+        # Adjust figure to make room for controls at the bottom
+        fig, ax = plt.subplots(num="Math Video Playback", figsize=(10, 9))
+        plt.subplots_adjust(bottom=0.25)
+        
         fig.patch.set_facecolor('black')
         ax.set_facecolor('black')
         ax.set_aspect('equal')
@@ -103,12 +107,15 @@ def launch_native_playback(all_frame_data, color, line_width, target_duration_se
         ax.set_ylim(-h/2 - 5, h/2 + 5)
 
         line_collection = []
+        
+        # State tracking for playback controls
+        playback = {
+            'current_frame': 0,
+            'is_playing': True
+        }
 
-        # CALCULATE DYNAMIC INTERVAL: Total Time / Number of Frames
-        # Ensures consistent playback speed regardless of frame count
-        interval_ms = (target_duration_sec * 1000) / len(all_frame_data)
-
-        def update(f_idx):
+        def draw_frame(f_idx):
+            """Core drawing logic for a single frame index."""
             for l in line_collection: l.remove()
             line_collection.clear()
             
@@ -119,10 +126,47 @@ def launch_native_playback(all_frame_data, color, line_width, target_duration_se
                 line_collection.append(line)
             
             ax.set_title(f"Math Playback: Frame {f_idx} | Pace: {target_duration_sec}s total", color='white')
+            fig.canvas.draw_idle()
+
+        # --- UI WIDGETS ---
+        # Slider for scrubbing through frames
+        ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03], facecolor='#1e293b')
+        slider = Slider(ax_slider, 'Frame ', 0, len(all_frame_data)-1, valinit=0, valstep=1, color=color)
+        slider.label.set_color('white')
+        slider.valtext.set_color('white')
+
+        # Play/Pause Button
+        ax_button = plt.axes([0.45, 0.03, 0.1, 0.04])
+        btn_play = Button(ax_button, 'Pause', color='#334155', hovercolor='#475569')
+        btn_play.label.set_color('white')
+
+        def on_slider_change(val):
+            playback['current_frame'] = int(val)
+            draw_frame(playback['current_frame'])
+
+        def toggle_playback(event):
+            playback['is_playing'] = not playback['is_playing']
+            btn_play.label.set_text('Play' if not playback['is_playing'] else 'Pause')
+
+        slider.on_changed(on_slider_change)
+        btn_play.on_clicked(toggle_playback)
+
+        interval_ms = (target_duration_sec * 1000) / len(all_frame_data)
+
+        def update(i):
+            """Animation loop update."""
+            if playback['is_playing']:
+                playback['current_frame'] = (playback['current_frame'] + 1) % len(all_frame_data)
+                # Setting slider value triggers the on_changed callback which draws the frame
+                slider.set_val(playback['current_frame'])
             return line_collection
 
+        # Start with the first frame
+        draw_frame(0)
+        
         ani = FuncAnimation(fig, update, frames=len(all_frame_data), interval=interval_ms, blit=False, repeat=True)
         plt.show(block=True)
+        
     except Exception as e:
         st.error(f"Playback error: {e}")
 
@@ -137,7 +181,6 @@ with st.sidebar:
     
     st.divider()
     st.header("Step 2: Playback Pace")
-    # New slider to control the "same space" / speed
     target_duration = st.slider("Target Playback Duration (sec)", 1, 30, 5)
     
     st.divider()
@@ -221,7 +264,8 @@ if video_file:
 
     finally:
         try:
-            if os.path.exists(video_path): os.remove(video_path)
+            if os.path.exists(video_path):
+                os.remove(video_path)
         except: pass
 else:
     st.info("Upload a video to begin.")
