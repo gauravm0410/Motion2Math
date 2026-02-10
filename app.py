@@ -358,6 +358,7 @@ with col_left:
                 cap = cv2.VideoCapture(v_path)
                 orig_fps = cap.get(cv2.CAP_PROP_FPS)
                 skip = max(1, int(orig_fps / fps_limit))
+                
                 f_data, m_eqs = [], []
                 p_bar = st.progress(0)
                 status = st.empty()
